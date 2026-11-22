@@ -1,4 +1,4 @@
-#include "../hal.h"
+#include "hal.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>

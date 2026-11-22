@@ -1,0 +1,6 @@
+*.elf
+*.bin
+*.o
+*.dylib
+__pycache__/
+.DS_Store

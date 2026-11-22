@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>Tama STAGE — USB-UART RAM Loader &amp; Setlist Sync</title>
+<style>
+  body {
+    margin: 0; padding: 24px; background: #0d1117; color: #e6edf3;
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    max-width: 720px; margin-inline: auto;
+  }
+  h1 { font-size: 20px; margin: 0 0 8px; }
+  p.sub { color: #8b949e; font-size: 13px; margin: 0 0 20px; }
+  .card {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 10px; color: #58a6ff; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  button {
+    background: #238636; color: #fff; border: 1px solid rgba(240,246,252,0.1);
+    border-radius: 6px; padding: 8px 14px; font-size: 13px; cursor: pointer;
+  }
+  button.secondary { background: #21262d; color: #e6edf3; border-color: #30363d; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  textarea {
+    width: 100%; height: 110px; background: #0d1117; color: #e6edf3;
+    border: 1px solid #30363d; border-radius: 6px; font-family: monospace;
+    font-size: 13px; padding: 8px; box-sizing: border-box; margin: 8px 0;
+  }
+  progress { width: 100%; height: 10px; margin-top: 8px; }
+  pre {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
+    padding: 10px; font-size: 12px; color: #8b949e; max-height: 180px;
+    overflow-y: auto; margin: 0; white-space: pre-wrap;
+  }
+  .warn { font-size: 12px; color: #d29922; margin-top: 8px; }
+</style>
+</head>
+<body>
+  <h1>Tama STAGE — USB-UART RAM Loader &amp; Setlist Sync</h1>
+  <p class="sub">Chrome / Edge の Web Serial API（460,800 baud）で、実機のフラッシュを書き換えずに RAM 一時実行と CSV セットリスト送信を行います。</p>
+
+  <div class="card">
+    <h2>1. USB-UART 接続（FT232RNL / 3.3V ロジック）</h2>
+    <div class="row">
+      <button id="btn-connect">シリアルポートに接続</button>
+      <button id="btn-disconnect" class="secondary" disabled>切断</button>
+      <span id="conn-status" style="font-size:13px;color:#8b949e;">未接続</span>
+    </div>
+    <div class="warn">※ 配線は TXD / RXD / GND の3本のみ（VCC は絶対に接続しないでください）。</div>
+  </div>
+
+  <div class="card">
+    <h2>2. RAM 一時ロード実行（Download 画面から）</h2>
+    <p style="font-size:12px;color:#8b949e;margin:0 0 10px;">
+      本体で <b>Planet → A → Connect → Download → Download</b> を開いた状態で <code>tama_stage.bin</code> を選択して送信します。電池を抜けば純正 ROM に戻ります。
+    </p>
+    <div class="row">
+      <input type="file" id="bin-file" accept=".bin">
+      <button id="btn-load" disabled>今すぐ送信</button>
+      <button id="btn-wait-load" class="secondary" disabled>Download 待機して自動送信</button>
+    </div>
+    <progress id="load-prog" value="0" max="100"></progress>
+  </div>
+
+  <div class="card">
+    <h2>3. セットリスト CSV ＆ 時刻同期送信（STAGE 起動後）</h2>
+    <textarea id="csv-input">1,OP SE,90,128
+2,SONG A,240,135
+3,MC,120,120
+4,ENCORE,300,140</textarea>
+    <div class="row">
+      <button id="btn-send-csv" disabled>CSV と現在時刻を送信</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>ログ</h2>
+    <pre id="log"></pre>
+  </div>
+
+<script>
+(() => {
+  'use strict';
+
+  const BAUD = 460800;
+  const IMAGE_SIZE = 0x10000;
+  const CHUNK = 0x1000;
+
+  /* Paradise Download protocol constants (from mameise/Paramix-Studio, GPL-3.0-or-later) */
+  const LV_A = [3, 175, 246, 44, 204, 25, 45, 199, 29, 242, 14, 63, 238, 148, 219, 113, 91, 21, 50, 246, 127, 248];
+  const LV_B = [11, 238, 128, 40, 225, 137, 250, 116, 146, 111, 247, 251, 126, 100, 255, 4, 18, 238, 64, 95, 162, 62];
+  const LV = (() => {
+    const o = new Uint8Array(LV_A.length + LV_B.length);
+    let s = 0x2C1B3C6D;
+    for (let i = 0; i < o.length; i++) {
+      s = (Math.imul(s, 1103515245) + 12345) & 0x7fffffff;
+      o[i] = (i & 1 ? LV_B : LV_A)[i >> 1] ^ ((s >>> 16) & 255);
+    }
+    return o;
+  })();
+  const LINK_KEY = String.fromCharCode(...LV.subarray(0, 32));
+  const PDLO_TOKEN = String.fromCharCode(...LV.subarray(32, 40));
+  const PDLO_XOR = (LV[40] | (LV[41] << 8) | (LV[42] << 16) | (LV[43] << 24)) >>> 0;
+
+  const logEl = document.getElementById('log');
+  const statusEl = document.getElementById('conn-status');
+  const btnConnect = document.getElementById('btn-connect');
+  const btnDisconnect = document.getElementById('btn-disconnect');
+  const btnLoad = document.getElementById('btn-load');
+  const btnWaitLoad = document.getElementById('btn-wait-load');
+  const btnSendCsv = document.getElementById('btn-send-csv');
+  const binInput = document.getElementById('bin-file');
+  const progEl = document.getElementById('load-prog');
+
+  let port = null, writer = null, reader = null, reading = false;
+  let lineBuf = [], lines = [], wake = null;
+  let binBytes = null;
+  let waitingForDevice = false;
+  let logIncomingLines = false;
+
+  function log(msg) {
+    const ts = new Date().toLocaleTimeString();
+    logEl.textContent += `[${ts}] ${msg}\n`;
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  const ascii = (s) => Uint8Array.from(s, (c) => c.charCodeAt(0));
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const u32 = (b, o) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+  function w32(b, o, v) {
+    b[o] = v & 255; b[o + 1] = (v >>> 8) & 255; b[o + 2] = (v >>> 16) & 255; b[o + 3] = (v >>> 24) & 255;
+  }
+  function crc16(d) {
+    let c = 0;
+    for (const b of d) {
+      c ^= b;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? ((c >>> 1) ^ 0xA001) : (c >>> 1);
+    }
+    return c;
+  }
+
+  function feedBytes(d) {
+    for (let i = 0; i < d.length; i++) {
+      const b = d[i];
+      if (b === 10) {
+        const s = String.fromCharCode(...lineBuf).trim();
+        lineBuf = [];
+        if (s) {
+          if (logIncomingLines) log('[TAMA] ' + s);
+          else lines.push(s);
+        }
+      } else if (b !== 13) {
+        if (b >= 32 && b < 127 && lineBuf.length < 200) lineBuf.push(b);
+        else lineBuf = [];
+      }
+    }
+    if (wake) { const w = wake; wake = null; w(); }
+  }
+
+  async function waitLine(ms) {
+    const end = Date.now() + ms;
+    for (;;) {
+      if (lines.length) return lines.shift();
+      const left = end - Date.now();
+      if (left <= 0) throw new Error('タイムアウトしました（Download 画面が開いているか確認してください）');
+      await new Promise((res) => {
+        const t = setTimeout(() => { wake = null; res(); }, Math.min(left, 300));
+        wake = () => { clearTimeout(t); res(); };
+      });
+    }
+  }
+
+  async function writeBytes(u8) {
+    if (!writer) throw new Error('未接続です');
+    await writer.write(u8);
+  }
+  async function writeLine(s) { await writeBytes(ascii(s + '\r\n')); }
+
+  function buildPdlo(img) {
+    if (img.length > IMAGE_SIZE) throw new Error(`バイナリが大きすぎます (${img.length} > ${IMAGE_SIZE})`);
+    const head = new Uint8Array(16);
+    head.set(ascii('PDLO'));
+    w32(head, 4, IMAGE_SIZE / 4);
+    head.set(ascii(PDLO_TOKEN), 8);
+    const body = new Uint8Array(IMAGE_SIZE);
+    body.set(img);
+    const f = new Uint8Array(16 + IMAGE_SIZE);
+    f.set(head);
+    f.set(body, 16);
+    for (let i = 0; i < f.length; i += 4) w32(f, i, u32(f, i) ^ PDLO_XOR);
+    return f;
+  }
+
+  let keystream = null;
+  async function makeChunk(idx, payload) {
+    const nonce = new Uint8Array([1, 0, 0, 0]);
+    if (!keystream) {
+      const s = new Uint8Array(4 + 32);
+      s.set(nonce);
+      s.set(ascii(LINK_KEY), 4);
+      keystream = new Uint8Array(await crypto.subtle.digest('SHA-256', s));
+    }
+    const body = new Uint8Array(12 + payload.length);
+    body.set(ascii('TCP'), 4);
+    body[7] = 3;
+    body[8] = idx & 255;
+    body[9] = 255 - (idx & 255);
+    const c = crc16(payload);
+    body[10] = c & 255;
+    body[11] = c >> 8;
+    body.set(payload, 12);
+    const k = keystream.slice();
+    for (let i = 0; i < body.length; i++) {
+      const j = i % 32;
+      body[i] ^= k[j];
+      k[j] = (k[j] * 2 + 1) & 255;
+    }
+    const out = new Uint8Array(4 + body.length);
+    out.set(nonce);
+    out.set(body, 4);
+    return out;
+  }
+
+  async function probeDevice() {
+    for (let t = 0; t < 3; t++) {
+      await writeBytes(ascii('\r\n'));
+      await sleep(150);
+      lines = []; lineBuf = [];
+      await writeLine('ECHO REQ');
+      const end = Date.now() + 2000;
+      while (Date.now() < end) {
+        try {
+          const l = await waitLine(Math.max(50, end - Date.now()));
+          if (l.includes('ECHO REP')) return true;
+        } catch { break; }
+      }
+    }
+    return false;
+  }
+
+  async function readLoop() {
+    reading = true;
+    try {
+      while (reading && reader) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value) feedBytes(value);
+      }
+    } catch (e) {
+      if (reading) log('受信エラー: ' + e.message);
+    }
+  }
+
+  function updateButtons() {
+    const ok = !!port;
+    btnConnect.disabled = ok;
+    btnDisconnect.disabled = !ok;
+    btnLoad.disabled = !(ok && binBytes) || waitingForDevice;
+    btnWaitLoad.disabled = !(ok && binBytes);
+    btnWaitLoad.textContent = waitingForDevice ? '待機を中止' : 'Download 待機して自動送信';
+    btnSendCsv.disabled = !ok || waitingForDevice;
+  }
+
+  btnConnect.addEventListener('click', async () => {
+    if (!('serial' in navigator)) {
+      log('このブラウザは Web Serial API に非対応です（Chrome または Edge を使用してください）');
+      return;
+    }
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: BAUD, dataBits: 8, stopBits: 1, parity: 'none' });
+      writer = port.writable.getWriter();
+      reader = port.readable.getReader();
+      readLoop();
+      statusEl.textContent = `接続済み (${BAUD} baud)`;
+      log('シリアルポートに接続しました');
+      updateButtons();
+    } catch (e) {
+      log('接続失敗: ' + e.message);
+      port = null;
+      updateButtons();
+    }
+  });
+
+  btnDisconnect.addEventListener('click', async () => {
+    reading = false;
+    try { if (reader) { await reader.cancel(); reader.releaseLock(); } } catch {}
+    try { if (writer) { writer.releaseLock(); } } catch {}
+    try { if (port) { await port.close(); } } catch {}
+    port = null; writer = null; reader = null;
+    statusEl.textContent = '未接続';
+    log('切断しました');
+    updateButtons();
+  });
+
+  binInput.addEventListener('change', async () => {
+    const f = binInput.files && binInput.files[0];
+    if (!f) { binBytes = null; updateButtons(); return; }
+    binBytes = new Uint8Array(await f.arrayBuffer());
+    log(`読み込み: ${f.name} (${binBytes.length} bytes)`);
+    updateButtons();
+  });
+
+  async function sendPdloNow() {
+    logIncomingLines = false;
+    progEl.value = 0;
+    const file = buildPdlo(binBytes);
+    lines = [];
+    await writeLine('PKT ' + file.length);
+    const ack = await waitLine(4000);
+    if (!ack.startsWith('ACK')) throw new Error('PKT 応答エラー: ' + ack);
+
+    let idx = 0, guard = 0;
+    while (idx * CHUNK < file.length) {
+      if (++guard > 200) throw new Error('再送回数が上限に達しました');
+      const off = idx * CHUNK;
+      const n = Math.min(CHUNK, file.length - off);
+      await writeBytes(await makeChunk(idx, file.subarray(off, off + n)));
+      const r = await waitLine(6000);
+      if (r.startsWith('ACK')) {
+        idx++;
+        progEl.value = Math.round((Math.min(idx * CHUNK, file.length) / file.length) * 100);
+      } else if (r.startsWith('ENQ')) {
+        const e = parseInt(r.slice(3), 10);
+        if (!isNaN(e)) idx = e;
+      } else if (r.startsWith('NAK')) {
+        log(`NAK (chunk ${idx}) 再送します`);
+      } else if (r.startsWith('CAN')) {
+        throw new Error('本体側で転送がキャンセルされました');
+      } else {
+        throw new Error('予期しない応答: ' + r);
+      }
+    }
+    log('転送完了！実機の PRAM 上で起動したはずです（以降の UART ログを表示します）。');
+    logIncomingLines = true;
+  }
+
+  btnLoad.addEventListener('click', async () => {
+    if (!binBytes) return;
+    btnLoad.disabled = true;
+    try {
+      log('Download 画面の応答を確認中...');
+      if (!(await probeDevice())) {
+        throw new Error('本体から ECHO REP が返りません。Download 画面・TX/RX 配線を確認してください。');
+      }
+      await sendPdloNow();
+    } catch (e) {
+      log('ロード失敗: ' + e.message);
+    } finally {
+      updateButtons();
+    }
+  });
+
+  btnWaitLoad.addEventListener('click', async () => {
+    if (waitingForDevice) {
+      waitingForDevice = false;
+      log('待機を中止しました');
+      updateButtons();
+      return;
+    }
+    if (!binBytes) return;
+    waitingForDevice = true;
+    updateButtons();
+    log('Download 画面を待機中...（本体の Download を開いて端子を当ててください）');
+    try {
+      while (waitingForDevice && port) {
+        await writeBytes(ascii('\r\n'));
+        await sleep(100);
+        lines = []; lineBuf = [];
+        await writeLine('ECHO REQ');
+        const end = Date.now() + 450;
+        let found = false;
+        while (Date.now() < end && waitingForDevice) {
+          try {
+            const l = await waitLine(Math.max(30, end - Date.now()));
+            if (l.includes('ECHO REP')) { found = true; break; }
+          } catch { break; }
+        }
+        if (found) {
+          log('本体を検出しました！自動で転送を開始します...');
+          waitingForDevice = false;
+          updateButtons();
+          await sendPdloNow();
+          return;
+        }
+      }
+    } catch (e) {
+      log('待機/転送エラー: ' + e.message);
+    } finally {
+      waitingForDevice = false;
+      updateButtons();
+    }
+  });
+
+  btnSendCsv.addEventListener('click', async () => {
+    try {
+      const now = new Date();
+      const hh = String(now.getHours()).padStart(2, '0');
+      const mm = String(now.getMinutes()).padStart(2, '0');
+      const ss = String(now.getSeconds()).padStart(2, '0');
+      const payload = `TIME ${hh}:${mm}:${ss}\nCLEAR\n` + document.getElementById('csv-input').value.trim() + `\nAPPLY\n`;
+      await writeBytes(ascii(payload));
+      log(`時刻 (${hh}:${mm}:${ss}) と CSV セットリストを送信しました`);
+    } catch (e) {
+      log('送信失敗: ' + e.message);
+    }
+  });
+})();
+</script>
+</body>
+</html>

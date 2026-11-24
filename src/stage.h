@@ -21,6 +21,7 @@ typedef enum {
     MENU_DEADLINE_MINUS,
     MENU_SETUP_SETLIST,
     MENU_RESET_TIMER,
+    MENU_EXIT_REBOOT,
     MENU_CLOSE,
     MENU_ITEM_COUNT
 } StageMenuItem_t;
@@ -62,6 +63,7 @@ void stage_init(StageState_t *st, const RtcTime_t *now_rtc, uint32_t now_ms);
 void stage_on_dial_short_press(StageState_t *st, const RtcTime_t *now_rtc, uint32_t now_ms);
 void stage_on_dial_rotate(StageState_t *st, int8_t delta);
 void stage_on_beat_reset(StageState_t *st, uint32_t now_ms);
+void stage_on_cancel(StageState_t *st);
 void stage_toggle_menu(StageState_t *st);
 void stage_process_uart_line(StageState_t *st, const char *line, const RtcTime_t *now_rtc, uint32_t now_ms);
 void stage_render(const StageState_t *st, uint16_t *fb, const RtcTime_t *now_rtc, uint32_t now_ms);

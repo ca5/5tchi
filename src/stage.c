@@ -177,6 +177,9 @@ static void execute_menu_item(StageState_t *st, const RtcTime_t *now_rtc, uint32
         case MENU_RESET_TIMER:
             reset_run_state(st, now_rtc, now_ms, true);
             break;
+        case MENU_EXIT_REBOOT:
+            hal_system_reboot();
+            break;
         case MENU_CLOSE:
         default:
             break;
@@ -325,6 +328,22 @@ void stage_on_beat_reset(StageState_t *st, uint32_t now_ms) {
     st->beat_origin_ms = now_ms;
 }
 
+void stage_on_cancel(StageState_t *st) {
+    if (st->setup_open) {
+        if (st->setup_editing) {
+            st->setup_editing = false;
+        } else if (st->setup_part_open) {
+            st->setup_part_open = false;
+        } else {
+            st->setup_open = false;
+        }
+        return;
+    }
+    if (st->menu_open) {
+        st->menu_open = false;
+    }
+}
+
 void stage_toggle_menu(StageState_t *st) {
     if (st->setup_open) {
         if (st->setup_part_open) {
@@ -459,17 +478,18 @@ static void render_menu(const StageState_t *st, uint16_t *fb) {
         "DEADLINE -1M",
         "SETUP SETLIST",
         "RESET TIMER",
+        "EXIT (REBOOT)",
         "CLOSE MENU"
     };
     draw_border(fb, 4, COLOR_YELLOW);
-    draw_centered_str(fb, 8, "RECOVERY MENU", COLOR_YELLOW, 1);
-    draw_rect(fb, 8, 18, 112, 1, COLOR_YELLOW);
+    draw_centered_str(fb, 7, "RECOVERY MENU", COLOR_YELLOW, 1);
+    draw_rect(fb, 8, 16, 112, 1, COLOR_YELLOW);
 
     for (int i = 0; i < MENU_ITEM_COUNT; i++) {
-        int y = 24 + i * 16;
+        int y = 21 + i * 15;
         bool sel = (i == (int)st->menu_cursor);
         if (sel) {
-            draw_rect(fb, 8, y - 2, 112, 12, COLOR_YELLOW);
+            draw_rect(fb, 8, y - 2, 112, 11, COLOR_YELLOW);
             font_draw_str(fb, 12, y, labels[i], COLOR_BLACK, 1);
         } else {
             font_draw_str(fb, 12, y, labels[i], COLOR_WHITE, 1);
@@ -520,7 +540,7 @@ static void render_setup_part(const StageState_t *st, uint16_t *fb) {
         }
     }
 
-    font_draw_str(fb, 8, 114, st->setup_editing ? "ROT:VAL PUSH:OK" : "ROT:FLD PUSH:ED", 0x7BEF, 1);
+    font_draw_str(fb, 8, 114, st->setup_editing ? "A/C/ROT:VAL B:OK" : "A/C/ROT:FLD B:ED", 0x7BEF, 1);
 }
 
 static void render_setup(const StageState_t *st, uint16_t *fb) {
@@ -589,7 +609,7 @@ static void render_setup(const StageState_t *st, uint16_t *fb) {
         }
     }
 
-    font_draw_str(fb, 8, 114, st->setup_editing ? "ROT:VAL PUSH:OK" : "ROT:SEL PUSH:ED", 0x7BEF, 1);
+    font_draw_str(fb, 8, 114, st->setup_editing ? "A/C/ROT:VAL B:OK" : "A/C/ROT:SEL B:ED", 0x7BEF, 1);
 }
 
 static void render_metronome(const StageState_t *st, uint16_t *fb, uint32_t now_ms, uint16_t border_col) {

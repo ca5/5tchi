@@ -92,6 +92,10 @@ void hal_debug_log(const char *s) {
     (void)s;
 }
 
+void hal_system_reboot(void) {
+    /* No-op in host simulator */
+}
+
 /* Host simulator bridge API */
 void sim_set_buttons(uint8_t mask) {
     atomic_store(&s_sim_buttons, mask);

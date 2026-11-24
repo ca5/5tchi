@@ -414,3 +414,27 @@ int hal_uart_read_line(char *buf, int max_len) {
 void hal_debug_log(const char *s) {
     uart1_puts(s);
 }
+
+static void flashctl_init(void) {
+    /* Enable XIP window (0x10000000 -> flash 0x11000) as in Paramix-Studio hw.c */
+    REG(0x4002F004u) = 0x60011000u;
+    REG(0x4002F000u) = 0x00000003u;
+    REG(0x40022000u) = 0x0000d018u;
+    REG(0x40022000u) = 0x0000d000u;
+    REG(0x40022000u) = 0x0000d080u;
+    REG(0x40022000u) = 0x0000d088u;
+    REG(0x40022008u) = 0x00003077u;
+    REG(0x4002200Cu) = 0x0000f000u;
+    REG(0x40022004u) = 0x00000400u;
+    REG(0x40022004u) = 0x00004000u;
+}
+
+void hal_system_reboot(void) {
+    /* Back to the Paradise as in Paramix-Studio hw_back_to_paradise() */
+    __asm volatile ("cpsid i" ::: "memory");
+    flashctl_init();
+    ((void (*)(void))(0x100FF568u | 1u))();
+    for (;;) {
+        __asm volatile ("nop");
+    }
+}

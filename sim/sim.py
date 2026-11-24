@@ -59,10 +59,10 @@ HTML_PAGE = """<!doctype html>
 <body>
   <canvas id="lcd" width="128" height="128"></canvas>
   <div class="controls">
-    <button data-bit="1">A</button>
-    <button data-bit="2">B</button>
-    <button data-bit="4">C (Beat)</button>
-    <button data-bit="8">DIAL (Press)</button>
+    <button data-bit="1">A (Next)</button>
+    <button data-bit="2">B (OK)</button>
+    <button data-bit="4">C (Beat/Back)</button>
+    <button data-bit="8">DIAL (OK)</button>
     <button id="dial-minus">Dial -</button>
     <button id="dial-plus">Dial +</button>
   </div>

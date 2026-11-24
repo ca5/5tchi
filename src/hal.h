@@ -39,5 +39,6 @@ int8_t  hal_input_read_dial_delta(void);
 void hal_rtc_get_time(RtcTime_t *out_time);
 int  hal_uart_read_line(char *buf, int max_len);
 void hal_debug_log(const char *s);
+void hal_system_reboot(void);
 
 #endif

@@ -33,6 +33,7 @@ void hal_delay_ms(uint32_t ms);
 uint16_t* hal_lcd_get_framebuffer(void);
 void hal_lcd_flush(void);
 void hal_lcd_set_backlight(uint8_t percent);
+void hal_lcd_sleep(bool sleep);
 
 uint8_t hal_input_read_buttons(void);
 int8_t  hal_input_read_dial_delta(void);

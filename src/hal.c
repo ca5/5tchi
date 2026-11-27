@@ -64,10 +64,21 @@ static void uart1_puts(const char *s) {
 }
 
 #define UART_RX_LINE_MAX 128
-static char    s_uart_line[UART_RX_LINE_MAX];
-static int     s_uart_len = 0;
-static uint8_t s_enc_prev = 0;
-static bool    s_bl_inited = false;
+#define UART_RING_SIZE   256
+static char     s_uart_line[UART_RX_LINE_MAX];
+static int      s_uart_len = 0;
+static char     s_uart_ring[UART_RING_SIZE];
+static volatile uint16_t s_ring_head = 0;
+static volatile uint16_t s_ring_tail = 0;
+static uint8_t  s_enc_prev = 0;
+static bool     s_bl_inited = false;
+static bool     s_lcd_sleeping = false;
+static uint32_t s_rtc_base_unix = 0;
+static uint32_t s_rtc_base_cnt  = 0;
+
+#define HW_SEC_COUNTER  REG(0x45000304u)
+#define PARA_MB         ((volatile uint32_t *)0x20000FC0u)
+#define PARA_MB_MAGIC   0x4B4C4350u
 
 static void udelay(volatile uint32_t n) {
     while (n--) __asm volatile ("nop");
@@ -268,6 +279,80 @@ static void pwm2(uint32_t mr1, int first) {
     REG(CT2_BASE + 0x00u) = 1u;
 }
 
+static void flashctl_init(void) {
+    /* Enable XIP window (0x10000000 -> flash 0x11000) as in Paramix-Studio hw.c */
+    REG(0x4002F004u) = 0x60011000u;
+    REG(0x4002F000u) = 0x00000003u;
+    REG(0x40022000u) = 0x0000d018u;
+    REG(0x40022000u) = 0x0000d000u;
+    REG(0x40022000u) = 0x0000d080u;
+    REG(0x40022000u) = 0x0000d088u;
+    REG(0x40022008u) = 0x00003077u;
+    REG(0x4002200Cu) = 0x0000f000u;
+    REG(0x40022004u) = 0x00000400u;
+    REG(0x40022004u) = 0x00004000u;
+}
+
+static int32_t para_days(int32_t y, int32_t m, int32_t d) {
+    y -= (m <= 2);
+    int32_t era = (y >= 0 ? y : y - 399) / 400;
+    int32_t yoe = y - era * 400;
+    int32_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    int32_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static uint32_t para_mailbox_read(uint32_t cnt, uint32_t max_age) {
+    volatile uint32_t *m = PARA_MB;
+    if (m[0] != PARA_MB_MAGIC || m[3] != ~m[1] || !m[1] || (cnt - m[2]) > max_age) {
+        return 0;
+    }
+    return m[1] + (cnt - m[2]);
+}
+
+static uint32_t para_flash_read(uint32_t cnt) {
+    for (uint32_t pg = 0x60EFE000u; pg <= 0x60EFF000u; pg += 0x1000u) {
+        const volatile uint8_t *b = (const volatile uint8_t *)pg;
+        uint32_t c = 0;
+        for (uint32_t i = 4; i < 0x1000u; i++) {
+            c ^= b[i];
+            for (int k = 0; k < 8; k++) c = (c & 1u) ? ((c >> 1) ^ 0xA001u) : (c >> 1);
+        }
+        if ((b[0] | ((uint32_t)b[1] << 8)) != c) continue;
+        if ((b[2] | ((uint32_t)b[3] << 8)) != (~c & 0xFFFFu)) continue;
+
+        uint32_t days = b[0x0C] | ((uint32_t)b[0x0D] << 8) | ((uint32_t)b[0x0E] << 16) | ((uint32_t)b[0x0F] << 24);
+        uint32_t sek  = b[0x10] | ((uint32_t)b[0x11] << 8) | ((uint32_t)b[0x12] << 16) | ((uint32_t)b[0x13] << 24);
+        if (days > 40000u || sek >= 86400u) continue;
+
+        uint32_t y  = b[0x1C] | ((uint32_t)b[0x1D] << 8);
+        uint32_t mo = b[0x1E] | ((uint32_t)b[0x1F] << 8);
+        uint32_t d  = b[0x20] | ((uint32_t)b[0x21] << 8);
+        uint32_t hh = b[0x22] | ((uint32_t)b[0x23] << 8);
+        uint32_t mi = b[0x24] | ((uint32_t)b[0x25] << 8);
+        uint32_t se = b[0x26] | ((uint32_t)b[0x27] << 8);
+        if (y < 2000u || y > 2100u || mo < 1u || mo > 12u || d < 1u || d > 31u || hh > 23u || mi > 59u || se > 59u) {
+            continue;
+        }
+        uint32_t t = (20089u + days) * 86400u + sek + cnt;
+        uint32_t f = (uint32_t)para_days((int32_t)y, (int32_t)mo, (int32_t)d) * 86400u + hh * 3600u + mi * 60u + se;
+        if (f > t + 600u || (t - f) > 366u * 86400u) continue;
+        return t;
+    }
+    return 0;
+}
+
+static void rtc_hw_init(void) {
+    uint32_t cnt = HW_SEC_COUNTER;
+    uint32_t t = para_mailbox_read(cnt, 120u);
+    if (!t) t = para_flash_read(cnt);
+    if (!t) t = para_mailbox_read(cnt, 86400u);
+    s_rtc_base_unix = t;
+    s_rtc_base_cnt  = cnt;
+    if (t) uart1_puts("[DBG] rtc=ok\n");
+    else   uart1_puts("[DBG] rtc=fallback\n");
+}
+
 void hal_init(void) {
     __asm volatile ("cpsid i" ::: "memory");
 
@@ -287,6 +372,8 @@ void hal_init(void) {
     pin_mux();
     uart1_init();
     uart1_puts("[DBG] 3:pin_mux+uart\n");
+    flashctl_init();
+    rtc_hw_init();
     display_power();
     uart1_puts("[DBG] 4:display_power\n");
     display_init();
@@ -308,11 +395,23 @@ uint32_t hal_get_ms(void) {
     return s_tick_ms;
 }
 
+static void uart1_poll_rx(void) {
+    while ((UART1_LSR & UART1_LSR_RDR) != 0u) {
+        char c = (char)(UART1_RBR_DLL & 0xFFu);
+        uint16_t next = (uint16_t)((s_ring_head + 1u) % UART_RING_SIZE);
+        if (next != s_ring_tail) {
+            s_uart_ring[s_ring_head] = c;
+            s_ring_head = next;
+        }
+    }
+}
+
 void hal_delay_ms(uint32_t ms) {
     uint32_t start = hal_get_ms();
     while ((hal_get_ms() - start) < ms) {
         wdt_feed();
-        __asm volatile ("nop");
+        uart1_poll_rx();
+        __asm volatile ("wfi");
     }
 }
 
@@ -333,6 +432,7 @@ void hal_lcd_flush(void) {
     }
     LCD_DC(1);
     for (uint32_t i = 0; i < (uint32_t)(LCD_WIDTH * LCD_HEIGHT); i++) {
+        if ((i & 0xFFu) == 0u) uart1_poll_rx();
         uint16_t p = s_framebuffer[i];
         uint8_t bytes[2] = { (uint8_t)(p >> 8), (uint8_t)(p & 0xFFu) };
         spi_tx(&bytes[0], 1);
@@ -356,6 +456,25 @@ void hal_lcd_set_backlight(uint8_t percent) {
         s_bl_inited = true;
     } else {
         pwm2(mr1, 0);
+    }
+}
+
+void hal_lcd_sleep(bool sleep) {
+    if (sleep == s_lcd_sleeping) return;
+    if (sleep) {
+        REG(CT2_BASE + 0x00u) = 0u;
+        REG(CT2_BASE + 0x34u) = 0u;
+        lcd_cmd(0x28u, 0, 0); /* DISPOFF */
+        lcd_cmd(0x10u, 0, 0); /* SLPIN */
+        s_bl_inited = false;
+        s_lcd_sleeping = true;
+    } else {
+        lcd_cmd(0x11u, 0, 0); /* SLPOUT */
+        hal_delay_ms(125u);
+        lcd_cmd(0x29u, 0, 0); /* DISPON */
+        hal_delay_ms(20u);
+        s_lcd_sleeping = false;
+        hal_lcd_set_backlight(60u);
     }
 }
 
@@ -383,6 +502,14 @@ int8_t hal_input_read_dial_delta(void) {
 }
 
 void hal_rtc_get_time(RtcTime_t *out_time) {
+    if (s_rtc_base_unix != 0u) {
+        uint32_t now_sec = s_rtc_base_unix + (HW_SEC_COUNTER - s_rtc_base_cnt);
+        uint32_t tod = now_sec % 86400u;
+        out_time->hour = (uint8_t)(tod / 3600u);
+        out_time->min  = (uint8_t)((tod % 3600u) / 60u);
+        out_time->sec  = (uint8_t)(tod % 60u);
+        return;
+    }
     uint32_t total_sec = s_tick_ms / 1000u;
     out_time->hour = (uint8_t)((total_sec / 3600u) % 24u);
     out_time->min  = (uint8_t)((total_sec / 60u) % 60u);
@@ -392,8 +519,10 @@ void hal_rtc_get_time(RtcTime_t *out_time) {
 int hal_uart_read_line(char *buf, int max_len) {
     if (!buf || max_len <= 1) return 0;
 
-    while ((UART1_LSR & UART1_LSR_RDR) != 0u) {
-        char c = (char)(UART1_RBR_DLL & 0xFFu);
+    uart1_poll_rx();
+    while (s_ring_tail != s_ring_head) {
+        char c = s_uart_ring[s_ring_tail];
+        s_ring_tail = (uint16_t)((s_ring_tail + 1u) % UART_RING_SIZE);
         if (c == '\r' || c == '\n') {
             if (s_uart_len > 0) {
                 int out_len = (s_uart_len < max_len - 1) ? s_uart_len : (max_len - 1);
@@ -415,23 +544,10 @@ void hal_debug_log(const char *s) {
     uart1_puts(s);
 }
 
-static void flashctl_init(void) {
-    /* Enable XIP window (0x10000000 -> flash 0x11000) as in Paramix-Studio hw.c */
-    REG(0x4002F004u) = 0x60011000u;
-    REG(0x4002F000u) = 0x00000003u;
-    REG(0x40022000u) = 0x0000d018u;
-    REG(0x40022000u) = 0x0000d000u;
-    REG(0x40022000u) = 0x0000d080u;
-    REG(0x40022000u) = 0x0000d088u;
-    REG(0x40022008u) = 0x00003077u;
-    REG(0x4002200Cu) = 0x0000f000u;
-    REG(0x40022004u) = 0x00000400u;
-    REG(0x40022004u) = 0x00004000u;
-}
-
 void hal_system_reboot(void) {
     /* Back to the Paradise as in Paramix-Studio hw_back_to_paradise() */
     __asm volatile ("cpsid i" ::: "memory");
+    pin_mux();
     flashctl_init();
     ((void (*)(void))(0x100FF568u | 1u))();
     for (;;) {

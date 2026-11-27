@@ -53,6 +53,10 @@ void hal_lcd_set_backlight(uint8_t percent) {
     atomic_store(&s_backlight_pct, percent);
 }
 
+void hal_lcd_sleep(bool sleep) {
+    atomic_store(&s_backlight_pct, sleep ? 0 : 60);
+}
+
 uint8_t hal_input_read_buttons(void) {
     return (uint8_t)atomic_load(&s_sim_buttons);
 }

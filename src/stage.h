@@ -9,6 +9,11 @@
 #define STAGE_LABEL_LEN 12
 
 typedef enum {
+    APP_MODE_STAGE = 0,
+    APP_MODE_CLOCK
+} AppMode_t;
+
+typedef enum {
     VIEW_STANDARD = 0,
     VIEW_BIG_CLOCK,
     VIEW_LAP_HISTORY,
@@ -21,6 +26,7 @@ typedef enum {
     MENU_DEADLINE_MINUS,
     MENU_SETUP_SETLIST,
     MENU_RESET_TIMER,
+    MENU_SWITCH_MODE,
     MENU_EXIT_REBOOT,
     MENU_CLOSE,
     MENU_ITEM_COUNT
@@ -46,6 +52,7 @@ typedef struct {
     int32_t     actual_sec[STAGE_MAX_PARTS];
     int32_t     cumulative_diff_sec;
 
+    AppMode_t       app_mode;
     StageView_t     view;
     bool            menu_open;
     StageMenuItem_t menu_cursor;

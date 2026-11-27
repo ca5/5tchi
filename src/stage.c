@@ -130,6 +130,7 @@ void stage_init(StageState_t *st, const RtcTime_t *now_rtc, uint32_t now_ms) {
     }
 
     st->rtc_offset_sec = 0;
+    st->app_mode = APP_MODE_STAGE;
     st->view = VIEW_STANDARD;
     st->menu_open = false;
     st->menu_cursor = MENU_PREV_PART;
@@ -176,6 +177,9 @@ static void execute_menu_item(StageState_t *st, const RtcTime_t *now_rtc, uint32
             break;
         case MENU_RESET_TIMER:
             reset_run_state(st, now_rtc, now_ms, true);
+            break;
+        case MENU_SWITCH_MODE:
+            st->app_mode = (st->app_mode == APP_MODE_STAGE) ? APP_MODE_CLOCK : APP_MODE_STAGE;
             break;
         case MENU_EXIT_REBOOT:
             hal_system_reboot();
@@ -407,6 +411,9 @@ void stage_process_uart_line(StageState_t *st, const char *line, const RtcTime_t
         if (parse_hhmmss_str(line + 5, &target_s, true)) {
             int32_t raw_s = (int32_t)now_rtc->hour * 3600 + (int32_t)now_rtc->min * 60 + (int32_t)now_rtc->sec;
             st->rtc_offset_sec = (target_s - raw_s + 86400) % 86400;
+            if (!st->running && !st->uart_has_explicit_end) {
+                st->deadline_sec_of_day = (effective_rtc_sec(st, now_rtc) + total_planned_sec(st)) % 86400;
+            }
         }
         return;
     }
@@ -423,6 +430,7 @@ void stage_process_uart_line(StageState_t *st, const char *line, const RtcTime_t
         reset_run_state(st, now_rtc, now_ms, !st->uart_has_explicit_end);
         st->menu_open = false;
         st->setup_open = false;
+        hal_debug_log("[UART] APPLY OK\n");
         return;
     }
 
@@ -478,21 +486,26 @@ static void render_menu(const StageState_t *st, uint16_t *fb) {
         "DEADLINE -1M",
         "SETUP SETLIST",
         "RESET TIMER",
+        "MODE: CLOCK",
         "EXIT (REBOOT)",
         "CLOSE MENU"
     };
     draw_border(fb, 4, COLOR_YELLOW);
-    draw_centered_str(fb, 7, "RECOVERY MENU", COLOR_YELLOW, 1);
-    draw_rect(fb, 8, 16, 112, 1, COLOR_YELLOW);
+    draw_centered_str(fb, 6, "RECOVERY MENU", COLOR_YELLOW, 1);
+    draw_rect(fb, 8, 15, 112, 1, COLOR_YELLOW);
 
     for (int i = 0; i < MENU_ITEM_COUNT; i++) {
-        int y = 21 + i * 15;
+        int y = 19 + i * 13;
         bool sel = (i == (int)st->menu_cursor);
+        const char *txt = labels[i];
+        if (i == MENU_SWITCH_MODE && st->app_mode == APP_MODE_CLOCK) {
+            txt = "MODE: TIMER";
+        }
         if (sel) {
-            draw_rect(fb, 8, y - 2, 112, 11, COLOR_YELLOW);
-            font_draw_str(fb, 12, y, labels[i], COLOR_BLACK, 1);
+            draw_rect(fb, 8, y - 1, 112, 10, COLOR_YELLOW);
+            font_draw_str(fb, 12, y, txt, COLOR_BLACK, 1);
         } else {
-            font_draw_str(fb, 12, y, labels[i], COLOR_WHITE, 1);
+            font_draw_str(fb, 12, y, txt, COLOR_WHITE, 1);
         }
     }
 }
@@ -739,6 +752,22 @@ static void render_lap_history_view(const StageState_t *st, uint16_t *fb) {
     }
 }
 
+static void render_clock_mode(const StageState_t *st, uint16_t *fb, const RtcTime_t *now_rtc) {
+    draw_border(fb, 2, COLOR_CYAN);
+    draw_centered_str(fb, 12, "CLOCK", COLOR_CYAN, 1);
+
+    int32_t tod = effective_rtc_sec(st, now_rtc);
+    char hhmm[6], ss[4];
+    fmt_hhmm(hhmm, tod);
+    ss[0] = ':';
+    fmt_2d(&ss[1], tod % 60);
+    ss[3] = '\0';
+
+    draw_centered_str(fb, 40, hhmm, COLOR_WHITE, 3);
+    draw_centered_str(fb, 70, ss, COLOR_GREEN, 2);
+    draw_centered_str(fb, 106, "HOLD B/DIAL:MENU", 0x7BEF, 1);
+}
+
 void stage_render(const StageState_t *st, uint16_t *fb, const RtcTime_t *now_rtc, uint32_t now_ms) {
     draw_rect(fb, 0, 0, LCD_WIDTH, LCD_HEIGHT, COLOR_BLACK);
 
@@ -748,6 +777,10 @@ void stage_render(const StageState_t *st, uint16_t *fb, const RtcTime_t *now_rtc
     }
     if (st->menu_open) {
         render_menu(st, fb);
+        return;
+    }
+    if (st->app_mode == APP_MODE_CLOCK) {
+        render_clock_mode(st, fb, now_rtc);
         return;
     }
 

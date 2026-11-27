@@ -66,6 +66,10 @@
 
   <div class="card">
     <h2>3. セットリスト CSV ＆ 時刻同期送信（STAGE 起動後）</h2>
+    <div class="row" style="margin-bottom:8px;">
+      <label style="font-size:12px;color:#8b949e;">終了予定時刻 (任意, 例 21:30):</label>
+      <input type="text" id="end-input" placeholder="空欄なら自動計算" style="background:#0d1117;color:#e6edf3;border:1px solid #30363d;border-radius:6px;padding:4px 8px;font-family:monospace;font-size:13px;width:140px;">
+    </div>
     <textarea id="csv-input">1,OP SE,90,128
 2,SONG A,240,135
 3,MC,120,120
@@ -400,9 +404,19 @@
       const hh = String(now.getHours()).padStart(2, '0');
       const mm = String(now.getMinutes()).padStart(2, '0');
       const ss = String(now.getSeconds()).padStart(2, '0');
-      const payload = `TIME ${hh}:${mm}:${ss}\nCLEAR\n` + document.getElementById('csv-input').value.trim() + `\nAPPLY\n`;
-      await writeBytes(ascii(payload));
-      log(`時刻 (${hh}:${mm}:${ss}) と CSV セットリストを送信しました`);
+      const csvLines = document.getElementById('csv-input').value
+        .split(/\r?\n/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const endVal = document.getElementById('end-input').value.trim();
+      const sendLines = [`TIME ${hh}:${mm}:${ss}`, 'CLEAR', ...csvLines];
+      if (/^\d{2}:\d{2}$/.test(endVal)) sendLines.push(`END ${endVal}`);
+      sendLines.push('APPLY');
+      for (const ln of sendLines) {
+        await writeBytes(ascii(ln + '\n'));
+        await sleep(30);
+      }
+      log(`時刻 (${hh}:${mm}:${ss}) と CSV セットリスト (${csvLines.length} パート) を送信しました`);
     } catch (e) {
       log('送信失敗: ' + e.message);
     }
